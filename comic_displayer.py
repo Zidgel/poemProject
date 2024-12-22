@@ -1,10 +1,10 @@
 import time
 import os
-from waveshare_epd import epd7in5_V2 ##TODO###  # Replace with your display's model (e.g., epd7in5_V2)
+from waveshare_epd import epd7in5_V2
 from PIL import Image, ImageDraw, ImageFont, ImageEnhance, ImageFilter
 
-base_folder = "/comic_strips"  # Base folder where images are stored
-display_interval = 20  # Time in seconds between updates
+base_folder = "/comic_strips"  # Base folder where images are stored 
+display_interval = 5  # Time in seconds between updates ##TODO
 class EinkImageProcessor:
     def __init__(self, use_4gray=True):
         self.epd = epd7in5_V2.EPD()
@@ -157,7 +157,6 @@ class EinkImageProcessor:
         else:
             self.epd.display(self.epd.getbuffer(final_image))
             
-        final_image.save("processed_" + image_path)  # Save processed version for comparison
         time.sleep(5)
              
     def clear(self):
@@ -169,35 +168,58 @@ class EinkImageProcessor:
             self.epd.Clear()
 
 
-def get_images_from_folder(folder):
-    """Returns a list of PNG files in the given folder."""
-    if os.path.exists(folder):
+def get_images_from_folder(folder, day):
+    """Returns a list of PNG files in the given folder for the given day."""
+    day_folder = os.path.join(folder, str(day))
+    if os.path.exists(day_folder):
         return sorted(
-            [os.path.join(folder, f) for f in os.listdir(folder) if f.endswith(".png")]
+            [os.path.join(day_folder, f) for f in os.listdir(day_folder) if f.endswith(".png")]
         )
-
     else:
-        print(f"Folder not found: {folder}")
+        print(f"Folder not found for day: {day_folder}")
         return []
 
+def load_day(filename):
+    if not os.path.exists(filename):
+        return 1
+    with open(filename, "r") as f:
+        content = f.read().strip()
+        if content.isdigit():
+            return int(content)
+        else:
+            return 1
+
+def save_day(filename, day):
+    with open(filename, "w") as f:
+        f.write(str(day))
+
 def main():
+    save_filename = "save.txt"
+    day = load_day(save_filename)
+
     processor = EinkImageProcessor(use_4gray=False)
+
     while True:
         # Get today's folder and images
         folder = base_folder
-        images = get_images_from_folder(folder)
+        images = get_images_from_folder(folder, day)
 
         if not images:
-            print(f"No images found in folder: {folder}")
+            print(f"No images found for day {day} in folder: {folder}")
         else:
-            for image_path in images:
-                processor.display_image(image_path)
-                time.sleep(display_interval)  # Wait before displaying the next image
-                processor.clear()
+            for _ in range(1): ##TODO
+                for image_path in images:
+                    processor.display_image(image_path)
+                    time.sleep(display_interval)  # Wait before displaying the next image
+                    # processor.clear()
 
-        # Wait for a while before rechecking the folder (adjust as needed)
+        # Wait before checking the next day
         print("Waiting for the next update...")
-        time.sleep(5)  # Check for a new day's folder every hour
+        # time.sleep(5)  # Adjust as needed, e.g., time.sleep(3600) for an hour
+
+        day += 1
+        save_day(save_filename, day)
+
 
 if __name__ == "__main__":
     main()

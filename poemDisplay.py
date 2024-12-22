@@ -1,200 +1,237 @@
 import time
 import os
+import logging
+from pathlib import Path
+from typing import Optional, Union
+from PIL import Image, ImageDraw, ImageFont, ImageEnhance, ImageFilter
 from waveshare_epd import epd7in5_V2
-from PIL import Image, ImageDraw, ImageFont, ImageEnhance, ImageFilter, ImageOps
-from textwrap import wrap
 
-base_folder = "/comic_strips"  # Not used now, but keeping for reference
-display_interval = 20  # Time in seconds between updates
-text_file = "A_CHARACTER.txt"  # The text file you want to display
-
-class EinkImageProcessor:
-    def __init__(self, use_4gray=True):
-        self.epd = epd7in5_V2.EPD()
+class EPaperDisplay:
+    """Controls a Waveshare 7.5inch V2 E-Paper display."""
+    
+    DEFAULT_FONT_SIZE = 24
+    DEFAULT_UPDATE_INTERVAL = 20  # seconds
+    
+    def __init__(self, use_4gray: bool = True):
+        """
+        Initialize the E-Paper display.
+        
+        Args:
+            use_4gray: Whether to use 4-level grayscale mode (True) or binary mode (False)
+        """
+        self.logger = logging.getLogger(__name__)
         self.use_4gray = use_4gray
+        
+        try:
+            self.epd = epd7in5_V2.EPD()
+            self.init_display()
+        except Exception as e:
+            self.logger.error(f"Failed to initialize display: {e}")
+            raise
+            
+        # Cache display dimensions
+        self.width = self.epd.width
+        self.height = self.epd.height
+        
+    def init_display(self) -> None:
+        """Initialize the display with appropriate mode."""
         self.epd.init()
-        if use_4gray:
-            print("Use 4Gray")
+        if self.use_4gray:
+            self.logger.info("Initializing in 4-gray mode")
             self.epd.init_4Gray()
         
-    def enhance_and_fit_image(self, image_path):
-        # Load the image
-        img = Image.open(image_path)
-        screen_width, screen_height = self.epd.width, self.epd.height
-        
-        # Convert to grayscale with enhanced bit depth
+    def enhance_image(self, img: Image.Image) -> Image.Image:
+        """Apply image enhancements for better display quality."""
         img = img.convert('L')
-        
-        # Apply subtle Gaussian blur to reduce noise before processing
         img = img.filter(ImageFilter.GaussianBlur(radius=0.5))
         
-        # Resize with high-quality algorithm
-        img = self._resize_image(img, screen_width, screen_height)
+        # Enhance contrast, brightness, and sharpness
+        enhancements = [
+            (ImageEnhance.Contrast, 1.4),
+            (ImageEnhance.Brightness, 1.2),
+            (ImageEnhance.Sharpness, 1.4)
+        ]
         
-        # Enhance image
-        img = self._enhance_image(img)
-        
-        if not self.use_4gray:
-            # Apply binary dithering for 2-color mode
-            img = self._apply_dithering(img)
-        else:
-            # Process for 4-gray display
-            img = self._process_4gray(img)
-        
-        return img
-
-    def _resize_image(self, img, target_width, target_height):
-        img_ratio = img.width / img.height
-        target_ratio = target_width / target_height
-        
-        white_bg = Image.new('L', (target_width, target_height), 255)
-        
-        if img_ratio > target_ratio:
-            new_width = target_width
-            new_height = int(target_width / img_ratio)
-        else:
-            new_width = int(target_height * img_ratio)
-            new_height = target_height
-        
-        img = img.resize((new_width, new_height), Image.LANCZOS)
-        
-        x_offset = (target_width - new_width) // 2
-        y_offset = (target_height - new_height) // 2
-        
-        white_bg.paste(img, (x_offset, y_offset))
-        
-        return white_bg
-
-    def _enhance_image(self, img):
-        img = ImageEnhance.Contrast(img).enhance(1.4)
-        img = ImageEnhance.Brightness(img).enhance(1.2)
-        img = ImageEnhance.Sharpness(img).enhance(1.4)
-        
+        for enhancer_class, factor in enhancements:
+            img = enhancer_class(img).enhance(factor)
+            
+        # Apply gamma correction
         gamma = 1.1
         gamma_table = [int((i / 255) ** gamma * 255) for i in range(256)]
         return img.point(gamma_table)
-
-    def _process_4gray(self, img):
-        threshold_map = [
-            0,  48, 12, 60,  3, 51, 15, 63,
-            32, 16, 44, 28, 35, 19, 47, 31,
-            8,  56,  4, 52, 11, 59,  7, 55,
-            40, 24, 36, 20, 43, 27, 39, 23,
-            2,  50, 14, 62,  1, 49, 13, 61,
-            34, 18, 46, 30, 33, 17, 45, 29,
-            10, 58,  6, 54,  9, 57,  5, 53,
-            42, 26, 38, 22, 41, 25, 37, 21
-        ]
-        threshold_map = [int(t * (255/64)) for t in threshold_map]
-        
+    
+    def process_grayscale(self, img: Image.Image) -> Image.Image:
+        """Process image for 4-level grayscale display."""
         width, height = img.size
         pixels = img.load()
-        
         output_img = Image.new('L', (width, height))
         output_pixels = output_img.load()
         
+        # Optimized dithering matrix
+        threshold_matrix = [
+            [0, 48, 12, 60], [32, 16, 44, 28],
+            [8, 56, 4, 52], [40, 24, 36, 20]
+        ]
+        
+        matrix_size = 4
         for y in range(height):
             for x in range(width):
                 old_pixel = pixels[x, y]
-                threshold = threshold_map[(x % 8) + (y % 8) * 8]
-                adjusted_pixel = old_pixel + (old_pixel - threshold) * 0.2
-                if adjusted_pixel > 220:
+                matrix_x = x % matrix_size
+                matrix_y = y % matrix_size
+                threshold = threshold_matrix[matrix_y][matrix_x] * 4
+                
+                # Apply error diffusion
+                if old_pixel > 220:
                     new_pixel = 255
-                elif adjusted_pixel > 165:
+                elif old_pixel > 165:
                     new_pixel = 170
-                elif adjusted_pixel > 90:
+                elif old_pixel > 90:
                     new_pixel = 85
                 else:
                     new_pixel = 0
-                
+                    
                 output_pixels[x, y] = new_pixel
                 
         return output_img
-
-    def _apply_dithering(self, img):
+    
+    def prepare_image(self, img: Image.Image) -> Image.Image:
+        """Prepare image for display with appropriate processing."""
+        img = self.enhance_image(img)
+        if self.use_4gray:
+            return self.process_grayscale(img)
         return img.convert('1', dither=Image.FLOYDSTEINBERG)
     
-    def display_image(self, image_path):
-        final_image = self.enhance_and_fit_image(image_path)
-        
-        if self.use_4gray:
-            self.epd.display_4Gray(self.epd.getbuffer_4Gray(final_image))
-        else:
-            self.epd.display(self.epd.getbuffer(final_image))
+    def display_image(self, image: Union[str, Image.Image, Path]) -> None:
+        """Display an image on the E-Paper display."""
+        try:
+            if isinstance(image, (str, Path)):
+                img = Image.open(image)
+            else:
+                img = image
+                
+            img = self.prepare_image(img)
             
-        final_image.save("processed_" + os.path.basename(image_path))  
-        time.sleep(5)
-             
-    def clear(self):
-        if self.use_4gray:
-            white_image = Image.new('L', (self.epd.width, self.epd.height), 255)
-            self.epd.display_4Gray(self.epd.getbuffer_4Gray(white_image))
-        else:
-            self.epd.Clear()
-
-def create_image_from_text(text, width, height, font_path=None, font_size=24):
-    """
-    Create a white-background image of the specified width and height,
-    with the given text drawn onto it.
-
-    Uses word wrapping to fit text within the image.
-    """
-    img = Image.new('L', (width, height), 255)  # White background
-    draw = ImageDraw.Draw(img)
-
-    # Load a font (Adjust path as needed)
-    # If you don't have a TTF font, omit font_path to use a default PIL font
-    if font_path and os.path.exists(font_path):
-        font = ImageFont.truetype(font_path, font_size)
-    else:
-        font = ImageFont.load_default()
-
-    # Word wrap the text to fit in the given width
-    max_width = width - 20  # Some padding
-    lines = []
-    for paragraph in text.split('\n'):
-        wrapped = wrap(paragraph, width=40)  # Adjust as needed
-        lines.extend(wrapped if wrapped else [''])
-
-    # Draw the text line by line
-    y_text = 10
-    for line in lines:
-        w, h = draw.textsize(line, font=font)
-        # If line too wide, you can dynamically wrap based on textsize if needed
-        draw.text(((width - w) / 2, y_text), line, font=font, fill=0)  # '0' for black text
-        y_text += h + 5
-
-    return img
-
-def main():
-    processor = EinkImageProcessor(use_4gray=False)
+            if self.use_4gray:
+                self.epd.display_4Gray(self.epd.getbuffer_4Gray(img))
+            else:
+                self.epd.display(self.epd.getbuffer(img))
+                
+        except Exception as e:
+            self.logger.error(f"Failed to display image: {e}")
+            raise
+            
+    def create_text_image(self, 
+                         text: str, 
+                         font_path: Optional[str] = None, 
+                         font_size: int = DEFAULT_FONT_SIZE) -> Image.Image:
+        """Create an image from text with proper formatting."""
+        img = Image.new('L', (self.width, self.height), 255)
+        draw = ImageDraw.Draw(img)
+        
+        try:
+            if font_path and os.path.exists(font_path):
+                font = ImageFont.truetype(font_path, font_size)
+            else:
+                font = ImageFont.load_default()
+        except Exception as e:
+            self.logger.warning(f"Failed to load font {font_path}, using default: {e}")
+            font = ImageFont.load_default()
+            
+        # Calculate text wrapping
+        avg_char_width = font.getlength("x")
+        max_chars = int(self.width / avg_char_width * 0.95)  # 95% of width
+        
+        # Process text with proper line breaks
+        lines = []
+        y_position = 10
+        
+        for paragraph in text.split('\n'):
+            words = paragraph.split()
+            current_line = []
+            current_length = 0
+            
+            for word in words:
+                word_length = len(word)
+                if current_length + word_length + 1 <= max_chars:
+                    current_line.append(word)
+                    current_length += word_length + 1
+                else:
+                    if current_line:
+                        lines.append(' '.join(current_line))
+                    current_line = [word]
+                    current_length = word_length + 1
+                    
+            if current_line:
+                lines.append(' '.join(current_line))
+            lines.append('')  # Add paragraph break
+            
+        # Draw text
+        for line in lines:
+            bbox = draw.textbbox((0, 0), line, font=font)
+            line_width = bbox[2] - bbox[0]
+            x_position = (self.width - line_width) // 2
+            
+            draw.text((x_position, y_position), line, font=font, fill=0)
+            y_position += bbox[3] - bbox[1] + 5  # Add 5px line spacing
+            
+        return img
     
-    # Get the screen dimensions from the processor epd
-    screen_width, screen_height = processor.epd.width, processor.epd.height
-
-    while True:
-        # Read text from the text file
-        if os.path.exists(text_file):
-            with open(text_file, 'r') as f:
-                content = f.read()
-        else:
-            content = "No text file found."
-
-        # Create an image from the text
-        text_img = create_image_from_text(content, screen_width, screen_height, font_path=None, font_size=24)
-
-        # Save this text image as a temporary file
-        temp_image_path = "text_display.png"
-        text_img.save(temp_image_path)
-
-        # Display the generated image
-        processor.display_image(temp_image_path)
-
-        time.sleep(display_interval)
-        processor.clear()
-
-        print("Waiting for the next update...")
-        time.sleep(5)  # Check every 5 seconds for new text
+    def clear(self) -> None:
+        """Clear the display."""
+        try:
+            if self.use_4gray:
+                white_image = Image.new('L', (self.width, self.height), 255)
+                self.epd.display_4Gray(self.epd.getbuffer_4Gray(white_image))
+            else:
+                self.epd.Clear()
+        except Exception as e:
+            self.logger.error(f"Failed to clear display: {e}")
+            raise
+            
+    def __enter__(self):
+        return self
+        
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Ensure proper cleanup when used as context manager."""
+        try:
+            self.clear()
+            self.epd.sleep()
+        except Exception as e:
+            self.logger.error(f"Error during cleanup: {e}")
+            
+def main():
+    # Set up logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    logger = logging.getLogger(__name__)
+    
+    text_file = Path("A_CHARACTER.txt")
+    
+    try:
+        with EPaperDisplay(use_4gray=False) as display:
+            while True:
+                try:
+                    text = text_file.read_text(encoding='utf-8')
+                except FileNotFoundError:
+                    logger.error(f"File not found: {text_file}")
+                    text = "File not found: Please create A_CHARACTER.txt"
+                except Exception as e:
+                    logger.error(f"Error reading file: {e}")
+                    text = f"Error reading file: {str(e)}"
+                
+                text_image = display.create_text_image(text)
+                display.display_image(text_image)
+                
+                time.sleep(EPaperDisplay.DEFAULT_UPDATE_INTERVAL)
+                
+    except KeyboardInterrupt:
+        logger.info("Program terminated by user")
+    except Exception as e:
+        logger.error(f"Unexpected error: {e}")
+        raise
 
 if __name__ == "__main__":
     main()
